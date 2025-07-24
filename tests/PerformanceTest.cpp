@@ -1,103 +1,310 @@
 #include "../include/MemoryPool.h"
-#include "../include/Common.h"
 #include <iostream>
 #include <vector>
-#include <thread>
 #include <chrono>
-#include <numeric> // for std::accumulate
+#include <random>
+#include <iomanip>
+#include <thread>
 
-// 为 MemoryPool 类创建一个明确的别名以解决命名冲突
 using MemPool = MemoryPool::MemoryPool;
+using namespace std::chrono;
 
-// 定义一个简单的计时器
-class Timer {
+// 计时器类
+class Timer
+{
+    high_resolution_clock::time_point start;
 public:
-    Timer() : start_(std::chrono::high_resolution_clock::now()) {}
-    
-    // 返回耗时，单位毫秒(ms)
-    double elapsed() {
-        auto end = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration<double, std::milli>(end - start_).count();
+    Timer() : start(high_resolution_clock::now()) {}
+
+    double elapsed()
+    {
+        auto end = high_resolution_clock::now();
+        return duration_cast<microseconds>(end - start).count() / 1000.0; // 转换为毫秒
     }
-private:
-    std::chrono::time_point<std::chrono::high_resolution_clock> start_;
 };
 
-// --- 基准测试函数 ---
-// n_threads: 线程数
-// n_allocs: 每个线程的分配次数
-// block_size: 每次分配的块大小
-void benchmark(const char* name, bool use_mem_pool, size_t n_threads, size_t n_allocs, size_t block_size) {
-    std::cout << "Benchmarking: " << name << " (" << n_threads << " threads, " << n_allocs << " allocs/thread, " << block_size << " bytes)..." << std::endl;
-
-    // 用于收集每个线程的耗时
-    std::vector<double> thread_times(n_threads);
-    
-    auto thread_func = [&](size_t thread_idx) {
-        std::vector<void*> ptrs;
-        ptrs.reserve(n_allocs);
-        
-        Timer t;
-        if (use_mem_pool) {
-            for (size_t i = 0; i < n_allocs; ++i) {
-                ptrs.push_back(MemPool::allocate(block_size));
-            }
-            for (size_t i = 0; i < n_allocs; ++i) {
-                MemPool::deallocate(ptrs[i], block_size);
-            }
-        } else {
-            for (size_t i = 0; i < n_allocs; ++i) {
-                ptrs.push_back(new char[block_size]);
-            }
-            for (size_t i = 0; i < n_allocs; ++i) {
-                delete[] static_cast<char*>(ptrs[i]);
-            }
-        }
-        thread_times[thread_idx] = t.elapsed();
+// 性能测试类
+class PerformanceTest
+{
+private:
+    // 测试统计信息
+    struct TestStats
+    {
+        double memPoolTime{0.0};
+        double systemTime{0.0};
+        size_t totalAllocs{0};
+        size_t totalBytes{0};
     };
 
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < n_threads; ++i) {
-        threads.emplace_back(thread_func, i);
+public:
+    // 1. 系统预热
+    static void warmup()
+    {
+        std::cout << "Warming up memory systems...\n";
+        // 使用 pair 来存储指针和对应的大小
+        std::vector<std::pair<void*, size_t>> warmupPtrs;
+
+        // 预热内存池
+        for (int i = 0; i < 1000; ++i)
+        {
+            for (size_t size : {32, 64, 128, 256, 512}) {
+                void* p = MemPool::allocate(size);
+                warmupPtrs.emplace_back(p, size);  // 存储指针和对应的大小
+            }
+        }
+
+        // 释放预热内存
+        for (const auto& [ptr, size] : warmupPtrs)
+        {
+            MemPool::deallocate(ptr, size);  // 使用实际分配的大小进行释放
+        }
+
+        std::cout << "Warmup complete.\n\n";
     }
-    for (auto& t : threads) {
-        t.join();
+
+    // 2. 小对象分配测试
+    static void testSmallAllocation()
+    {
+        constexpr size_t NUM_ALLOCS = 100000;
+        constexpr size_t SMALL_SIZE = 32;
+
+        std::cout << "\nTesting small allocations (" << NUM_ALLOCS << " allocations of "
+                  << SMALL_SIZE << " bytes):" << std::endl;
+
+        // 测试内存池
+        {
+            Timer t;
+            std::vector<void*> ptrs;
+            ptrs.reserve(NUM_ALLOCS);
+
+            for (size_t i = 0; i < NUM_ALLOCS; ++i)
+            {
+                ptrs.push_back(MemPool::allocate(SMALL_SIZE));
+
+                // 模拟真实使用：部分立即释放
+                if (i % 4 == 0)
+                {
+                    MemPool::deallocate(ptrs.back(), SMALL_SIZE);
+                    ptrs.pop_back();
+                }
+            }
+
+            for (void* ptr : ptrs)
+            {
+                MemPool::deallocate(ptr, SMALL_SIZE);
+            }
+
+            std::cout << "Memory Pool: " << std::fixed << std::setprecision(3)
+                      << t.elapsed() << " ms" << std::endl;
+        }
+
+        // 测试new/delete
+        {
+            Timer t;
+            std::vector<void*> ptrs;
+            ptrs.reserve(NUM_ALLOCS);
+
+            for (size_t i = 0; i < NUM_ALLOCS; ++i)
+            {
+                ptrs.push_back(new char[SMALL_SIZE]);
+
+                if (i % 4 == 0)
+                {
+                    delete[] static_cast<char*>(ptrs.back());
+                    ptrs.pop_back();
+                }
+            }
+
+            for (void* ptr : ptrs)
+            {
+                delete[] static_cast<char*>(ptr);
+            }
+
+            std::cout << "New/Delete: " << std::fixed << std::setprecision(3)
+                      << t.elapsed() << " ms" << std::endl;
+        }
     }
 
-    double total_time = std::accumulate(thread_times.begin(), thread_times.end(), 0.0);
-    printf("  -> Total time: %.2f ms\n\n", total_time);
-}
+    // 3. 多线程测试
+    static void testMultiThreaded()
+    {
+        constexpr size_t NUM_THREADS = 4;
+        constexpr size_t ALLOCS_PER_THREAD = 25000;
+        constexpr size_t MAX_SIZE = 256;
 
-int main() {
-    const size_t ALLOCS = 100000;
+        std::cout << "\nTesting multi-threaded allocations (" << NUM_THREADS
+                  << " threads, " << ALLOCS_PER_THREAD << " allocations each):"
+                  << std::endl;
 
-    std::cout << "=======================================" << std::endl;
-    std::cout << "    STARTING PERFORMANCE BENCHMARKS" << std::endl;
-    std::cout << "=======================================" << std::endl;
+        auto threadFunc = [](bool useMemPool)
+        {
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<> dis(8, MAX_SIZE);
+            std::vector<std::pair<void*, size_t>> ptrs;
+            ptrs.reserve(ALLOCS_PER_THREAD);
 
-    // --- 场景1: 单线程，小对象分配 ---
-    benchmark("MemoryPool (1T, small obj)", true, 1, ALLOCS, 16);
-    benchmark("new/delete (1T, small obj)", false, 1, ALLOCS, 16);
+            for (size_t i = 0; i < ALLOCS_PER_THREAD; ++i)
+            {
+                size_t size = dis(gen);
+                void* ptr = useMemPool ? MemPool::allocate(size)
+                                     : new char[size];
+                ptrs.push_back({ptr, size});
 
-    // --- 场景2: 多线程，小对象分配 ---
-    // 这是最能体现 ThreadCache 优势的场景
-    benchmark("MemoryPool (8T, small obj)", true, 8, ALLOCS, 32);
-    benchmark("new/delete (8T, small obj)", false, 8, ALLOCS, 32);
+                // 随机释放一些内存
+                if (rand() % 100 < 75)
+                {  // 75%的概率释放
+                    size_t index = rand() % ptrs.size();
+                    if (useMemPool) {
+                        MemPool::deallocate(ptrs[index].first, ptrs[index].second);
+                    } else {
+                        delete[] static_cast<char*>(ptrs[index].first);
+                    }
+                    ptrs[index] = ptrs.back();
+                    ptrs.pop_back();
+                }
+            }
 
-    // --- 场景3: 多线程，中等对象分配 ---
-    // 这个场景下，ThreadCache 和 CentralCache 会频繁交互
-    benchmark("MemoryPool (8T, medium obj)", true, 8, ALLOCS, 256);
-    benchmark("new/delete (8T, medium obj)", false, 8, ALLOCS, 256);
-    
-    // --- 场景4: 多线程，大对象分配 ---
-    // 这个场景下，双方都应该直接走系统调用，性能差距不大
-    // MAX_BYTES 定义在 MemoryPool 命名空间中
-    benchmark("MemoryPool (4T, large obj)", true, 4, ALLOCS/10, MemoryPool::MAX_BYTES + 1);
-    benchmark("new/delete (4T, large obj)", false, 4, ALLOCS/10, MemoryPool::MAX_BYTES + 1);
-    
-    std::cout << "=======================================" << std::endl;
-    std::cout << "     PERFORMANCE BENCHMARKS FINISHED" << std::endl;
-    std::cout << "=======================================" << std::endl;
+            // 清理剩余内存
+            for (const auto& [ptr, size] : ptrs)
+            {
+                if (useMemPool)
+                {
+                    MemPool::deallocate(ptr, size);
+                }
+                else
+                {
+                    delete[] static_cast<char*>(ptr);
+                }
+            }
+        };
+
+        // 测试内存池
+        {
+            Timer t;
+            std::vector<std::thread> threads;
+
+            for (size_t i = 0; i < NUM_THREADS; ++i)
+            {
+                threads.emplace_back(threadFunc, true);
+            }
+
+            for (auto& thread : threads)
+            {
+                thread.join();
+            }
+
+            std::cout << "Memory Pool: " << std::fixed << std::setprecision(3)
+                      << t.elapsed() << " ms" << std::endl;
+        }
+
+        // 测试new/delete
+        {
+            Timer t;
+            std::vector<std::thread> threads;
+
+            for (size_t i = 0; i < NUM_THREADS; ++i)
+            {
+                threads.emplace_back(threadFunc, false);
+            }
+
+            for (auto& thread : threads)
+            {
+                thread.join();
+            }
+
+            std::cout << "New/Delete: " << std::fixed << std::setprecision(3)
+                      << t.elapsed() << " ms" << std::endl;
+        }
+    }
+
+    // 4. 混合大小测试
+    static void testMixedSizes()
+    {
+        constexpr size_t NUM_ALLOCS = 50000;
+        const size_t SIZES[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
+
+        std::cout << "\nTesting mixed size allocations (" << NUM_ALLOCS
+                  << " allocations):" << std::endl;
+
+        // 测试内存池
+        {
+            Timer t;
+            std::vector<std::pair<void*, size_t>> ptrs;
+            ptrs.reserve(NUM_ALLOCS);
+
+            for (size_t i = 0; i < NUM_ALLOCS; ++i)
+            {
+                size_t size = SIZES[rand() % 8];
+                void* p = MemPool::allocate(size);
+                ptrs.emplace_back(p, size);
+
+                // 批量释放
+                if (i % 100 == 0 && !ptrs.empty())
+                {
+                    size_t releaseCount = std::min(ptrs.size(), size_t(20));
+                    for (size_t j = 0; j < releaseCount; ++j)
+                    {
+                        MemPool::deallocate(ptrs.back().first, ptrs.back().second);
+                        ptrs.pop_back();
+                    }
+                }
+            }
+
+            for (const auto& [ptr, size] : ptrs)
+            {
+                MemPool::deallocate(ptr, size);
+            }
+
+            std::cout << "Memory Pool: " << std::fixed << std::setprecision(3)
+                      << t.elapsed() << " ms" << std::endl;
+        }
+
+        // 测试new/delete
+        {
+            Timer t;
+            std::vector<std::pair<void*, size_t>> ptrs;
+            ptrs.reserve(NUM_ALLOCS);
+
+            for (size_t i = 0; i < NUM_ALLOCS; ++i)
+            {
+                size_t size = SIZES[rand() % 8];
+                void* p = new char[size];
+                ptrs.emplace_back(p, size);
+
+                if (i % 100 == 0 && !ptrs.empty())
+                {
+                    size_t releaseCount = std::min(ptrs.size(), size_t(20));
+                    for (size_t j = 0; j < releaseCount; ++j)
+                    {
+                        delete[] static_cast<char*>(ptrs.back().first);
+                        ptrs.pop_back();
+                    }
+                }
+            }
+
+            for (const auto& [ptr, size] : ptrs)
+            {
+                delete[] static_cast<char*>(ptr);
+            }
+
+            std::cout << "New/Delete: " << std::fixed << std::setprecision(3)
+                      << t.elapsed() << " ms" << std::endl;
+        }
+    }
+};
+
+int main()
+{
+    std::cout << "Starting performance tests..." << std::endl;
+
+    // 预热系统
+    PerformanceTest::warmup();
+
+    // 运行测试
+    PerformanceTest::testSmallAllocation();
+    PerformanceTest::testMultiThreaded();
+    PerformanceTest::testMixedSizes();
 
     return 0;
 }

@@ -12,8 +12,9 @@ namespace MemoryPool {
             return instance;
         }
 
-        // 申请内存，index是内存块大小类别的索引，返回值是内存块链表的头指针
-        void* fetchRange(size_t index);
+        // 申请内存，index是内存块大小类别的索引，期望获得batchNum个内存块，
+        // 返回值是内存块链表的头指针
+        void* fetchRange(size_t index, size_t batchNum);
 
         // 归还内存，（头指针，大小，索引）
         void returnRange(void* start, size_t size, size_t index);

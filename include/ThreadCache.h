@@ -53,6 +53,9 @@ namespace MemoryPool
         // 这个计数的目的是为了触发 returnToCentralCache。
         std::array<size_t, FREE_LIST_SIZE> freeListSize_;
 
+        //根据内存块大小，计算一次性从 CentralCache 批量获取的数量。
+         size_t getBatchNum(size_t size);
+
     };
 
 } // namespace MemoryPool

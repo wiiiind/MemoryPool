@@ -31,7 +31,7 @@ namespace MemoryPool {
 
             if (span->numPages>numPages) {
                 Span* newSpan = new Span();
-                newSpan->pageAddr = static_cast<char*>(span->pageAddr) + span->numPages * PAGE_SIZE;
+                newSpan->pageAddr = static_cast<char*>(span->pageAddr) + numPages * PAGE_SIZE;
                 newSpan->numPages = span->numPages - numPages;
                 newSpan->next = nullptr;
 
